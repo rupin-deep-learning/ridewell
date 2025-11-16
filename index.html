@@ -1,0 +1,1692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cycling Terrain Simulator</title>
+
+  <style>
+    /* Basic clean layout */
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: system-ui, sans-serif;
+      background: #dde6ee;
+      color: #222;
+    }
+
+    #scene {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+
+    /* UI Panel */
+    #ui {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      padding: 16px 20px;
+      background: rgba(255, 255, 255, 0.82);
+      border-radius: 12px;
+      width: 260px;
+      z-index: 10;
+      backdrop-filter: blur(6px);
+      max-height: 90vh; /* Ensure it fits on smaller screens */
+      overflow-y: auto; /* Allow scrolling */
+    }
+
+    #ui h1 {
+      font-size: 20px;
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    #ui h2 {
+      margin-top: 16px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    button,
+    .file-btn {
+      display: block;
+      width: 100%;
+      padding: 10px 15px;
+      margin-top: 8px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 500;
+      text-align: center;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    .file-btn {
+      background: #4caf50;
+      color: white;
+      text-decoration: none;
+      line-height: 1.2;
+    }
+
+    .file-btn input[type="file"] {
+      display: none;
+    }
+
+    /* Status Lines & Info */
+    .status-line {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #555;
+      min-height: 16px;
+    }
+    
+    #speed-control {
+      margin-top: 20px;
+      border-top: 1px solid #ddd;
+      padding-top: 10px;
+    }
+    
+    #speed-slider {
+      width: 100%;
+      margin: 10px 0;
+    }
+
+    #ride-info {
+      margin-top: 20px;
+      border-top: 1px solid #ddd;
+      padding-top: 10px;
+    }
+
+    #ride-info > div {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      font-size: 15px;
+    }
+
+    #ride-info span, #speed-control span {
+      font-weight: 600;
+      color: #222;
+    }
+  </style>
+
+</head>
+<body>
+
+  <div id="ui">
+    <h1>Cycling Terrain Simulator</h1>
+
+    <div id="gpx-section">
+      <label class="file-btn">
+        Choose GPX and Start
+        <input id="gpx-file" type="file" accept=".gpx" />
+      </label>
+
+      <button id="demo-btn">Use Demo Route</button>
+      <div id="gpx-status" class="status-line">No route loaded.</div>
+      <div id="dem-status" class="status-line"></div>
+    </div>
+    
+    <div id="speed-control">
+      <h2>Ride Speed</h2>
+      <input type="range" id="speed-slider" min="1.0" max="15.0" step="0.1" value="7.0" />
+      <div class="status-line">Current: <span id="hud-current-speed">7.0</span> m/s (<span id="hud-kmh">25.2</span> km/h)</div>
+    </div>
+
+    <div id="themes">
+      <h2>Themes</h2>
+      <button data-theme="english">English Countryside</button>
+      <button data-theme="fairytale">Fairytale Dusk</button>
+      <button data-theme="adventure">Adventure Land</button>
+      <button data-theme="clear">Clear Scenery</button>
+    </div>
+
+    <div id="ride-info">
+      <h2>Ride Info</h2>
+      <div>Distance: <span id="hud-distance">0.00 km</span></div>
+      <div>Speed: <span id="hud-speed">0.0 km/h</span></div>
+      <div>Elevation: <span id="hud-elev">0 m</span></div>
+    </div>
+  </div>
+
+  <canvas id="scene"></canvas>
+
+  <script type="module">
+    // --- External Library Imports (Using CDN for large dependencies) ---
+    import * as THREE from './lib/three.module.js';
+    import { OrbitControls } from './lib/OrbitControls.js';
+
+    // =================================================================
+    // Global State (from main.js)
+    // =================================================================
+
+    let scene, camera, renderer, controls;
+    let terrainMesh = null;
+    let currentBiomeGroup = null;
+    let currentRoad = null;
+    let biomeSprites = [];
+    let track3D = [];
+    let distanceAlong = 0;
+    let speed = 7.0; // meters/sec ~ 25 km/h
+    let lastTime = 0;
+    let elevationScale = 1.0;
+
+    // HUD elements
+    const hudDist = document.getElementById("hud-distance");
+    const hudSpeed = document.getElementById("hud-speed");
+    const hudElev = document.getElementById("hud-elev");
+    const gpxStatus = document.getElementById("gpx-status");
+    const demStatus = document.getElementById("dem-status");
+    const themeButtons = document.getElementById("themes");
+    
+    // New speed control elements (ADDED)
+    const speedSlider = document.getElementById("speed-slider");
+    const hudCurrentSpeed = document.getElementById("hud-current-speed");
+    const hudKMH = document.getElementById("hud-kmh");
+
+    // =================================================================
+    // Inlined js/util.js (Shared math utilities)
+    // =================================================================
+    
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function smoothstep(edge0, edge1, x) {
+      const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+      return t * t * (3 - 2 * t);
+    }
+
+    function mapRange(x, inMin, inMax, outMin, outMax) {
+      return outMin + ((x - inMin) * (outMax - outMin)) / (inMax - inMin);
+    }
+
+    // Degrees ↔ Radians
+    const toRad = deg => (deg * Math.PI) / 180;
+    const toDeg = rad => (rad * 180) / Math.PI;
+
+    // Distance between 2 lat/lon points using Haversine
+    function haversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371000; // meters
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    // Perlin/Simplex Noise (Placeholder for full implementation)
+    function rand(seed) { /* ... */ return Math.random(); } 
+    function fbm(v, octaves, persistence, lacunarity) { /* ... */ return 0; } 
+
+
+    // THREE.js Geometry disposal helper
+    function disposeHierarchy(node) {
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        const child = node.children[i];
+        disposeHierarchy(child);
+      }
+      if (node.geometry) {
+        node.geometry.dispose();
+      }
+      if (node.material) {
+        if (Array.isArray(node.material)) {
+          node.material.forEach(m => m.dispose());
+        } else {
+          node.material.dispose();
+        }
+      }
+    }
+
+    // Smoothing
+    function gaussianBlur1D(arr, sigma = 1.0, iterations = 1) {
+      const kernelSize = Math.max(3, Math.floor(sigma * 6));
+      const half = Math.floor(kernelSize / 2);
+
+      // Build Gaussian kernel
+      const kernel = [];
+      let sum = 0;
+      for (let i = -half; i <= half; i++) {
+        const v = Math.exp(-(i * i) / (2 * sigma * sigma));
+        kernel.push(v);
+        sum += v;
+      }
+      for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+
+      const temp = new Float32Array(arr.length);
+
+      for (let iter = 0; iter < iterations; iter++) {
+        for (let i = 0; i < arr.length; i++) {
+          let acc = 0;
+          for (let k = -half; k <= half; k++) {
+            const idx = clamp(i + k, 0, arr.length - 1);
+            acc += arr[idx] * kernel[k + half];
+          }
+          temp[i] = acc;
+        }
+        arr.set(temp);
+      }
+    }
+
+    // =================================================================
+    // Inlined js/gpx.js (GPX Loading and Track Resampling)
+    // =================================================================
+
+    // Spherical Mercator projection
+    function projectLatLon(lat, lon) {
+        const R = 6378137; // Earth radius in meters
+        const x = R * toRad(lon);
+        const y = R * Math.log(Math.tan(Math.PI / 4 + toRad(lat) / 2));
+        return { x, y };
+    }
+
+    // 1. Load and parse GPX file
+    async function loadGPX(fileOrPath) {
+      let text;
+
+      if (typeof fileOrPath === "string") {
+        // Path to GPX file (or demo string)
+        const res = await fetch(fileOrPath);
+        text = await res.text();
+      } else if (fileOrPath instanceof File) {
+        // File input from <input type="file">
+        text = await fileOrPath.text();
+      } else {
+         // Assume it's the demo GPX string being passed directly
+         text = fileOrPath;
+      }
+
+      const xml = new DOMParser().parseFromString(text, "text/xml");
+      const pts = [...xml.getElementsByTagName("trkpt")];
+
+      if (!pts.length) throw new Error("No <trkpt> elements found in GPX.");
+
+      const out = pts.map(p => {
+        const lat = parseFloat(p.getAttribute("lat"));
+        const lon = parseFloat(p.getAttribute("lon"));
+        const eleNode = p.getElementsByTagName("ele")[0];
+        const ele = eleNode ? parseFloat(eleNode.textContent) : 0;
+
+        const { x, y } = projectLatLon(lat, lon);
+
+        return { lat, lon, ele, x, y, z: ele };
+      });
+
+      // 2. Center the track to use (0,0) as its center
+      let avgX = 0, avgY = 0;
+      for (const p of out) { avgX += p.x; avgY += p.y; }
+      avgX /= out.length;
+      avgY /= out.length;
+
+      for (const p of out) {
+          p.x -= avgX;
+          p.y -= avgY;
+      }
+
+      // 3. Compute distances (3D)
+      computeDistances(out);
+
+      return out;
+    }
+
+    // Compute cumulative distance along the track
+    function computeDistances(track) {
+      let dist = 0;
+      for (let i = 1; i < track.length; i++) {
+        const a = track[i - 1];
+        const b = track[i];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dz = b.z - a.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        dist += d;
+        b.cumDist = dist;
+      }
+      track[0].cumDist = 0;
+    }
+
+    // 4. Resample track every 'stepMeters'
+    // Produces evenly spaced track to prevent jagged road geometry
+    function resampleTrack(track, stepMeters = 5) {
+      if (track.length < 2) return track;
+
+      const total = track[track.length - 1].cumDist;
+      const out = [];
+      let target = 0;
+
+      for (; target <= total; target += stepMeters) {
+        // find segment containing target
+        let i = 0;
+        while (i < track.length - 1 && track[i + 1].cumDist < target) i++;
+
+        const a = track[i];
+        const b = track[i + 1];
+        const t =
+          (target - a.cumDist) /
+          (b.cumDist - a.cumDist);
+
+        out.push({
+          x: lerp(a.x, b.x, t),
+          y: lerp(a.y, b.y, t),
+          z: lerp(a.z, b.z, t),
+          cumDist: target,
+          lat: lerp(a.lat, b.lat, t),
+          lon: lerp(a.lon, b.lon, t),
+          ele: lerp(a.ele, b.ele, t)
+        });
+      }
+      
+      // Compute 2D points array for DEM/Road
+      const xy = out.map(p => ({ x: p.x, y: p.y }));
+      const ele = out.map(p => p.ele);
+
+      return {
+        points: out,
+        xy,
+        ele,
+        length: total,
+        minX: Math.min(...xy.map(p => p.x)),
+        maxX: Math.max(...xy.map(p => p.x)),
+        minY: Math.min(...xy.map(p => p.y)),
+        maxY: Math.max(...xy.map(p => p.y)),
+        minLat: Math.min(...out.map(p => p.lat)),
+        maxLat: Math.max(...out.map(p => p.lat)),
+        minLon: Math.min(...out.map(p => p.lon)),
+        maxLon: Math.max(...out.map(p => p.lon)),
+      };
+    }
+
+    // =================================================================
+    // Inlined js/dem.js (DEM Loading and Sculpting)
+    // =================================================================
+
+    const TILE_SIZE = 256;
+    const DEM_ZOOM = 13;   // Good balance between detail and bandwidth
+
+    // A standard tile URL from AWS Terrain Tiles (free, no token required)
+    function demTileURL(x, y, z = DEM_ZOOM) {
+      return `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+    }
+
+    // Convert lat/lon to tile coordinates
+    function lon2tile(lon, z) {
+      return Math.floor(((lon + 180) / 360) * Math.pow(2, z));
+    }
+
+    function lat2tile(lat, z) {
+      const rad = (lat * Math.PI) / 180;
+      return Math.floor(
+        ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) *
+        Math.pow(2, z)
+      );
+    }
+
+    // Decode elevation from RGB color values
+    function decodeElevation(r, g, b) {
+      return (r * 256 + g + b / 256) - 32768;
+    }
+
+    // Fetch and process DEM data for the bounding box around the track
+    async function loadDEM(track, opts = {}) {
+      const { minLat, maxLat, minLon, maxLon } = track;
+      const z = DEM_ZOOM;
+      
+      // Determine tile range
+      const t0x = lon2tile(minLon, z);
+      const t0y = lat2tile(maxLat, z);
+      const t1x = lon2tile(maxLon, z);
+      const t1y = lat2tile(minLat, z);
+
+      const tileWidth = t1x - t0x + 1;
+      const tileHeight = t1y - t0y + 1;
+
+      // Total pixel size of the grid
+      const width = tileWidth * TILE_SIZE;
+      const height = tileHeight * TILE_SIZE;
+      const data = new Float32Array(width * height);
+
+      demStatus.textContent = `Fetching ${tileWidth * tileHeight} DEM tiles...`;
+
+      const tiles = [];
+
+      for (let tx = t0x; tx <= t1x; tx++) {
+        for (let ty = t0y; ty <= t1y; ty++) {
+          const url = demTileURL(tx, ty, z);
+          const xOffset = (tx - t0x) * TILE_SIZE;
+          const yOffset = (ty - t0y) * TILE_SIZE;
+
+          tiles.push(fetchTile(url, xOffset, yOffset, data, width));
+        }
+      }
+
+      await Promise.all(tiles);
+
+      demStatus.textContent = `DEM data loaded.`;
+      
+      return {
+          data,
+          width,
+          height,
+          t0x, t0y, t1x, t1y,
+          track // Store the track data for later reference
+      };
+    }
+
+    // Fetch a single tile
+    async function fetchTile(url, xOffset, yOffset, gridData, gridWidth) {
+      const img = new Image();
+      img.crossOrigin = 'Anonymous';
+      
+      // Return a promise that resolves when the image is loaded and processed
+      return new Promise((resolve, reject) => {
+          img.onload = () => {
+              try {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = TILE_SIZE;
+                  canvas.height = TILE_SIZE;
+                  const ctx = canvas.getContext('2d');
+                  ctx.drawImage(img, 0, 0);
+                  const imageData = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
+
+                  for (let y = 0; y < TILE_SIZE; y++) {
+                      for (let x = 0; x < TILE_SIZE; x++) {
+                          const idx4 = (y * TILE_SIZE + x) * 4;
+                          const r = imageData[idx4];
+                          const g = imageData[idx4 + 1];
+                          const b = imageData[idx4 + 2];
+                          
+                          const ele = decodeElevation(r, g, b);
+                          
+                          const gridIdx = (yOffset + y) * gridWidth + (xOffset + x);
+                          gridData[gridIdx] = ele;
+                      }
+                  }
+                  resolve();
+
+              } catch (e) {
+                  reject(e);
+              }
+          };
+          img.onerror = () => reject(new Error(`Failed to load tile: ${url}`));
+          img.src = url;
+      });
+    }
+
+    // Build the local DEM grid in world coordinates (meters)
+    function buildLocalDEM(track, rawDEM) {
+      const { t0x, t0y, t1x, t1y, data, width, height } = rawDEM;
+      
+      // Total bounds in tiles
+      const numXTiles = t1x - t0x + 1;
+      const numYTiles = t1y - t0y + 1;
+
+      // Latitude/Longitude range of the DEM data
+      const minLon = track.minLon;
+      const maxLon = track.maxLon;
+      const minLat = track.minLat;
+      const maxLat = track.maxLat;
+
+      // Find the physical dimensions of the DEM in world coordinates (meters)
+      const { x: wMinX, y: wMinY } = projectLatLon(minLat, minLon);
+      const { x: wMaxX, y: wMaxY } = projectLatLon(maxLat, maxLon);
+
+      // Total size and resolution in meters
+      const sizeX = wMaxX - wMinX;
+      const sizeY = wMaxY - wMinY;
+      const res = sizeX / width; // Resolution (meters per pixel)
+
+      // The local DEM grid will only cover the area of the track + padding
+      const padding = 500; // 500 meters of padding around the track
+      const minX = track.minX - padding;
+      const maxX = track.maxX + padding;
+      const minY = track.minY - padding;
+      const maxY = track.maxY + padding;
+
+      // Recalculate grid dimensions based on the padded track
+      const gridWidth = Math.ceil((maxX - minX) / res);
+      const gridHeight = Math.ceil((maxY - minY) / res);
+      const gridData = new Float32Array(gridWidth * gridHeight);
+
+      // Sample the raw DEM data into the local grid
+      for (let j = 0; j < gridHeight; j++) {
+        for (let i = 0; i < gridWidth; i++) {
+          const gx = minX + i * res;
+          const gy = minY + j * res;
+
+          // Convert back to lat/lon for raw DEM lookup
+          // This is a rough estimation since the DEM is already tile-based
+          const lon = mapRange(gx, wMinX, wMaxX, minLon, maxLon);
+          const lat = mapRange(gy, wMinY, wMaxY, minLat, maxLat);
+
+          // Bilinear sample the raw DEM
+          const rx = mapRange(lon, minLon, maxLon, 0, width);
+          const ry = mapRange(lat, maxLat, minLat, 0, height);
+
+          // Sample raw DEM data (simple nearest for now)
+          const ri = clamp(Math.floor(rx), 0, width - 1);
+          const rj = clamp(Math.floor(ry), 0, height - 1);
+          const rawIdx = rj * width + ri;
+
+          gridData[j * gridWidth + i] = data[rawIdx];
+        }
+      }
+
+      return {
+        data: gridData,
+        width: gridWidth,
+        height: gridHeight,
+        res,
+        minX,
+        minY,
+        rawDEM // Includes the track reference
+      };
+    }
+
+    // Modifies DEM grid so a smooth corridor is carved around the track.
+    function sculptDEMGrid(grid, track, opts = {}) {
+      const widthInner = opts.widthInner ?? 15;  // forced elevation
+      const widthOuter = opts.widthOuter ?? 35;  // blend back to DEM
+
+      const {
+        minX, minY, res, width, height, data
+      } = grid;
+
+      const N = track.xy.length;
+
+      for (let j = 0; j < height; j++) {
+        for (let i = 0; i < width; i++) {
+          const gx = minX + i * res;
+          const gy = minY + j * res;
+
+          // Find closest point on track
+          let best = Infinity;
+          let bestEle = 0;
+
+          for (let k = 0; k < N; k++) {
+            const dx = gx - track.xy[k].x;
+            const dy = gy - track.xy[k].y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+
+            if (d < best) {
+              best = d;
+              bestEle = track.ele[k];
+            }
+          }
+
+          if (best < widthOuter) {
+            const currentEle = data[j * width + i];
+            let newEle;
+
+            if (best <= widthInner) {
+              // Inner zone: force elevation to track's elevation
+              newEle = bestEle;
+            } else {
+              // Outer zone: blend from track elevation back to original DEM
+              const t = smoothstep(widthInner, widthOuter, best);
+              newEle = lerp(bestEle, currentEle, t);
+            }
+            data[j * width + i] = newEle;
+          }
+        }
+      }
+    }
+
+    // =================================================================
+    // Inlined js/terrain.js (Terrain Mesh Generation)
+    // =================================================================
+
+    // Simple box blur for DEM smoothing
+    function smoothDEM(data, width, height, passes) {
+      const temp = new Float32Array(data.length);
+
+      for (let p = 0; p < passes; p++) {
+        for (let j = 1; j < height - 1; j++) {
+          for (let i = 1; i < width - 1; i++) {
+            const idx = j * width + i;
+            let sum = data[idx];
+            sum += data[idx - width]; // N
+            sum += data[idx + width]; // S
+            sum += data[idx - 1];     // W
+            sum += data[idx + 1];     // E
+            sum /= 5;
+            temp[idx] = sum;
+          }
+        }
+        for (let i = 0; i < data.length; i++) data[i] = temp[i] || data[i]; // Apply, handling edges
+      }
+    }
+
+    // buildTerrainMesh(grid, opts)
+    function buildTerrainMesh(grid, opts = {}) {
+      const {
+        data,
+        width,
+        height,
+        res,
+        minX,
+        minY
+      } = grid;
+
+      const elevationScale = opts.elevationScale ?? 1.0;
+      const color = opts.color ?? 0xc8d2b5;       // soft green
+      const smoothPasses = opts.smooth ?? 1;
+
+      // Optional smoothing (simple box blur)
+      if (smoothPasses > 0) {
+        smoothDEM(data, width, height, smoothPasses);
+      }
+
+      // Build geometry
+      const geometry = new THREE.BufferGeometry();
+      const vertices = [];
+      const normals = [];
+      const uvs = [];
+      const indices = [];
+
+      for (let j = 0; j < height; j++) {
+        for (let i = 0; i < width; i++) {
+          const x = minX + i * res;
+          const y = minY + j * res;
+          const z = data[j * width + i] * elevationScale; // Z is elevation
+
+          vertices.push(x, z, y); // THREE.js uses (X, Z, Y) for terrain (X, Up, Depth/North)
+          normals.push(0, 1, 0); // Placeholder, will be computed
+          uvs.push(i / (width - 1), 1 - j / (height - 1));
+        }
+      }
+
+      // Build indices
+      for (let j = 0; j < height - 1; j++) {
+        for (let i = 0; i < width - 1; i++) {
+          const a = j * width + i;
+          const b = j * width + i + 1;
+          const c = (j + 1) * width + i;
+          const d = (j + 1) * width + i + 1;
+
+          // Triangle 1: a, b, d
+          indices.push(a, b, d);
+          // Triangle 2: a, d, c
+          indices.push(a, d, c);
+        }
+      }
+
+      geometry.setIndex(indices);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+
+      geometry.computeVertexNormals();
+
+      // Material
+      const material = new THREE.MeshLambertMaterial({
+        color,
+        side: THREE.DoubleSide
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.receiveShadow = true;
+      mesh.castShadow = false;
+      mesh.name = 'TerrainMesh';
+      
+      // Attach grid data for later use by biomes/themes
+      mesh.grid = grid;
+
+      return { mesh, width, height, res, minX, minY, data, grid };
+    }
+
+    // Helper to get local slope for biome placement
+    function localSlope(grid, i, j) {
+      // FIX: Ensure 'height' is destructured from grid
+      const { data, width, height, res, elevationScale } = grid; 
+      const idx = j * width + i;
+      const z = data[idx] * elevationScale;
+
+      const zN = data[clamp(j - 1, 0, height - 1) * width + i] * elevationScale;
+      const zS = data[clamp(j + 1, 0, height - 1) * width + i] * elevationScale;
+      const zE = data[j * width + clamp(i + 1, 0, width - 1)] * elevationScale;
+      const zW = data[j * width + clamp(i - 1, 0, width - 1)] * elevationScale;
+
+      const dzDx = (zE - zW) / (2 * res);
+      const dzDy = (zS - zN) / (2 * res);
+
+      const tangent = Math.sqrt(dzDx * dzDx + dzDy * dzDy);
+      return toDeg(Math.atan(tangent));
+    }
+
+    // Detect potential lake centers (points significantly lower than neighbors)
+    function detectLakes(grid, threshold = 1.2) {
+      const { data, width, height, res, minX, minY } = grid;
+      const lakes = [];
+
+      // Simplified heuristic:
+      // - If a point is lower than neighbors by > threshold meters, mark as lake center
+      for (let j = 1; j < height - 1; j++) {
+        for (let i = 1; i < width - 1; i++) {
+          const idx = j * width + i;
+          const z = data[idx];
+
+          const zN = data[(j - 1) * width + i];
+          const zS = data[(j + 1) * width + i];
+          const zE = data[j * width + (i + 1)];
+          const zW = data[j * width + (i - 1)];
+
+          const avg = (zN + zS + zE + zW) / 4;
+
+          if (avg - z > threshold) {
+            const x = minX + i * res;
+            const y = minY + j * res;
+
+            lakes.push({
+              x,
+              y,
+              radius: 20 + Math.random() * 40 // visual placeholder
+            });
+          }
+        }
+      }
+
+      return lakes;
+    }
+
+    // Bilinear sample for precise terrain queries (road alignment, biomes)
+    function sampleHeightLocal(grid, x, y) {
+      const { data, width, height, res, minX, minY } = grid;
+
+      const fx = (x - minX) / res;
+      const fy = (y - minY) / res;
+
+      const i0 = clamp(Math.floor(fx), 0, width - 2);
+      const j0 = clamp(Math.floor(fy), 0, height - 2);
+      const i1 = i0 + 1;
+      const j1 = j0 + 1;
+
+      const tx = fx - i0;
+      const ty = fy - j0;
+
+      // Bilinear interpolation
+      const z00 = data[j0 * width + i0];
+      const z10 = data[j0 * width + i1];
+      const z01 = data[j1 * width + i0];
+      const z11 = data[j1 * width + i1];
+
+      const zx0 = lerp(z00, z10, tx);
+      const zx1 = lerp(z01, z11, tx);
+
+      return lerp(zx0, zx1, ty);
+    }
+
+    // =================================================================
+    // Inlined js/road.js (Road Mesh Generation)
+    // =================================================================
+
+    function buildRoadMeshes(track, terrainGrid, opts = {}) {
+      const roadWidth = opts.roadWidth ?? 6;
+      const shoulderWidth = opts.shoulderWidth ?? 4;
+      const elevationScale = opts.elevationScale ?? 1;
+
+      // STEP 1 — Compute tangent + normal vectors along the track
+      const N = track.xy.length;
+      const tangents = new Array(N);
+      const normals = new Array(N);
+      const points = track.xy;
+
+      for (let i = 0; i < N; i++) {
+        const i0 = clamp(i - 1, 0, N - 1);
+        const i1 = clamp(i + 1, 0, N - 1);
+
+        const dx = points[i1].x - points[i0].x;
+        const dy = points[i1].y - points[i0].y;
+
+        // Tangent is simply the direction vector
+        const T = new THREE.Vector2(dx, dy).normalize();
+        tangents[i] = T;
+
+        // Normal (perpendicular)
+        normals[i] = new THREE.Vector2(T.y, -T.x); // Normal is tangent rotated 90 degrees
+      }
+
+      // STEP 2 — Align road points to sculpted terrain
+      const halfRoad = roadWidth / 2;
+      const halfShoulder = (roadWidth + shoulderWidth) / 2;
+
+      const roadL = []; // Road left edge (XY + Z)
+      const roadR = []; // Road right edge (XY + Z)
+      const shoulderL = []; // Shoulder left edge
+      const shoulderR = []; // Shoulder right edge
+
+      for (let i = 0; i < N; i++) {
+        const P = points[i];
+        const ele = track.ele[i] * elevationScale;
+        const NORM = normals[i];
+
+        // Road Points (aligned exactly to track elevation)
+        const L_road = new THREE.Vector3(
+          P.x + NORM.x * halfRoad,
+          P.y + NORM.y * halfRoad,
+          ele
+        );
+        const R_road = new THREE.Vector3(
+          P.x - NORM.x * halfRoad,
+          P.y - NORM.y * halfRoad,
+          ele
+        );
+
+        // Shoulder Points (sampled from surrounding terrain)
+        const L_shoulder = new THREE.Vector3(
+          P.x + NORM.x * halfShoulder,
+          P.y + NORM.y * halfShoulder,
+          0 // Z will be sampled
+        );
+        const R_shoulder = new THREE.Vector3(
+          P.x - NORM.x * halfShoulder,
+          P.y - NORM.y * halfShoulder,
+          0 // Z will be sampled
+        );
+
+        // Sample Z for shoulders
+        L_shoulder.z = sampleHeightLocal(terrainGrid, L_shoulder.x, L_shoulder.y) * elevationScale;
+        R_shoulder.z = sampleHeightLocal(terrainGrid, R_shoulder.x, R_shoulder.y) * elevationScale;
+
+        roadL.push(L_road);
+        roadR.push(R_road);
+        shoulderL.push(L_shoulder);
+        shoulderR.push(R_shoulder);
+      }
+
+      // STEP 3 — Build meshes
+      const roadMaterial = new THREE.MeshStandardMaterial({
+        color: opts.roadColor ?? 0x444444,
+        roughness: 0.8
+      });
+      const shoulderMaterial = new THREE.MeshStandardMaterial({
+        color: opts.shoulderColor ?? 0x888888,
+        roughness: 0.9
+      });
+
+      const roadMesh = buildSurfaceMesh(roadL, roadR, roadMaterial);
+      roadMesh.name = 'RoadMesh';
+      roadMesh.castShadow = true;
+      roadMesh.receiveShadow = false;
+
+      // Shoulders: left and right
+      const leftShoulder = buildSurfaceMesh(shoulderL, roadL, shoulderMaterial);
+      const rightShoulder = buildSurfaceMesh(roadR, shoulderR, shoulderMaterial);
+      leftShoulder.name = 'LeftShoulder';
+      rightShoulder.name = 'RightShoulder';
+
+      const group = new THREE.Group();
+      group.add(roadMesh, leftShoulder, rightShoulder);
+
+      return { group, road: roadMesh, leftShoulder, rightShoulder };
+    }
+
+    // Helper to build a surface mesh from two parallel lines of 3D points
+    function buildSurfaceMesh(leftPts, rightPts, matOptions) {
+      const N = leftPts.length;
+
+      const verts = [];
+      const norms = [];
+      const uvs = [];
+      const indices = [];
+
+      // Build vertex pairs
+      for (let i = 0; i < N; i++) {
+        const L = leftPts[i];
+        const R = rightPts[i];
+
+        // Two vertices per row: L and R. THREE.js uses (X, Z, Y) for (east, up, north)
+        verts.push(L.x, L.z, L.y); 
+        verts.push(R.x, R.z, R.y);
+
+        // Dummy normals
+        norms.push(0, 1, 0);
+        norms.push(0, 1, 0);
+
+        // UVs: simple projection
+        const u = i / (N - 1);
+        uvs.push(0, u);
+        uvs.push(1, u);
+      }
+
+      // Indices: two triangles per segment
+      for (let i = 0; i < N - 1; i++) {
+        const a = i * 2;
+        const b = a + 1;
+        const c = a + 2;
+        const d = a + 3;
+
+        // Quad: a,b,d + a,d,c
+        indices.push(a, b, d);
+        indices.push(a, d, c);
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setIndex(indices);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+
+      geometry.computeVertexNormals();
+
+      const material = Array.isArray(matOptions) ? matOptions : new THREE.MeshStandardMaterial(matOptions);
+      const mesh = new THREE.Mesh(geometry, material);
+      return mesh;
+    }
+
+    // =================================================================
+    // Inlined js/biome.js (Biome Generation)
+    // =================================================================
+
+    // Helper: distance from a point to the nearest point on the track
+    function distanceToTrack(track, x, y) {
+      const pts = track.xy;
+      let best = Infinity;
+
+      for (let i = 0; i < pts.length; i++) {
+        const dx = x - pts[i].x;
+        const dy = y - pts[i].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < best) best = d;
+      }
+
+      return best;
+    }
+
+    // buildLakes(grid, options)
+    function buildLakes(grid, options = {}) {
+      const color = options.color ?? 0x70c1ff;
+      const opacity = options.opacity ?? 0.92;
+      const elevationScale = options.elevationScale ?? 1;
+
+      const group = new THREE.Group();
+      const detectedLakes = detectLakes(grid);
+
+      const waterMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        side: THREE.DoubleSide
+      });
+
+      for (const lake of detectedLakes) {
+        // Sample height at the lake center
+        let z = sampleHeightLocal(grid, lake.x, lake.y) * elevationScale;
+        z -= 0.1; // Place slightly below the surrounding terrain to prevent z-fighting
+
+        const geo = new THREE.CircleGeometry(lake.radius, 32);
+        const mesh = new THREE.Mesh(geo, waterMat);
+
+        // Place on the XZ plane (Y in the original code is Z in THREE.js)
+        mesh.position.set(lake.x, z, lake.y);
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.name = 'Lake';
+
+        group.add(mesh);
+      }
+      return group;
+    }
+
+    // Tree/Grass instantiation helpers
+    const DUMMY = new THREE.Object3D();
+    const P = new THREE.Vector3();
+    const Q = new THREE.Quaternion();
+
+    function buildTreeInstances(grid, track, options = {}) {
+      const { data, width, height, res, minX, minY } = grid;
+      const elevationScale = options.elevationScale ?? 1;
+      const countPerKm = options.countPerKm ?? 200;
+      const minDistToTrack = options.minDistToTrack ?? 20;
+      const maxSlopeDeg = options.maxSlopeDeg ?? 35;
+      const colors = options.colors ?? { trunk: 0x7a4a21, foliage: 0x4f6b4a };
+
+      const totalAreaKm2 = (width * res) * (height * res) / 1000000;
+      const count = Math.ceil(totalAreaKm2 * countPerKm);
+
+      const trunkGeo = new THREE.CylinderGeometry(0.5, 0.7, 5, 8);
+      const foliageGeo = new THREE.ConeGeometry(3, 8, 16);
+
+      const trunkMat = new THREE.MeshLambertMaterial({ color: colors.trunk });
+      const foliageMat = new THREE.MeshLambertMaterial({ color: colors.foliage });
+
+      const trunkInstanced = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
+      const foliageInstanced = new THREE.InstancedMesh(foliageGeo, foliageMat, count);
+
+      let placed = 0;
+      let attempts = 0;
+      const maxAttempts = count * 20;
+
+      while (placed < count && attempts < maxAttempts) {
+        attempts++;
+
+        const i = Math.floor(Math.random() * width);
+        const j = Math.floor(Math.random() * height);
+
+        const x = minX + i * res;
+        const y = minY + j * res;
+        const z = data[j * width + i] * elevationScale;
+
+        const dTrack = distanceToTrack(track, x, y);
+        if (dTrack < minDistToTrack) continue;
+
+        const slope = localSlope(grid, i, j);
+        if (slope > maxSlopeDeg) continue;
+
+        const jitterX = (Math.random() - 0.5) * res * 1.1;
+        const jitterY = (Math.random() - 0.5) * res * 1.1;
+
+        const xJ = x + jitterX;
+        const yJ = y + jitterY;
+        const zJ = sampleHeightLocal(grid, xJ, yJ) * elevationScale;
+
+        // Trunk
+        P.set(xJ, zJ + 2.5, yJ);
+        const scale = 0.7 + Math.random() * 0.6;
+        DUMMY.position.copy(P);
+        DUMMY.scale.set(scale, scale, scale);
+        DUMMY.updateMatrix();
+        trunkInstanced.setMatrixAt(placed, DUMMY.matrix);
+
+        // Foliage
+        DUMMY.position.set(xJ, zJ + 7.5, yJ);
+        DUMMY.updateMatrix();
+        foliageInstanced.setMatrixAt(placed, DUMMY.matrix);
+
+        placed++;
+      }
+
+      // Update the actual count to the number of trees successfully placed
+      trunkInstanced.count = placed;
+      foliageInstanced.count = placed;
+
+      // Set Shadows
+      trunkInstanced.castShadow = true;
+      foliageInstanced.castShadow = true;
+
+      const group = new THREE.Group();
+      group.add(trunkInstanced, foliageInstanced);
+      return group;
+    }
+
+    function buildGrassInstances(grid, track, options = {}) {
+      const { data, width, height, res, minX, minY } = grid;
+      const elevationScale = options.elevationScale ?? 1;
+      const countPerKm = options.countPerKm ?? 900;
+      const minDistToTrack = options.minDistToTrack ?? 7;
+      const maxSlopeDeg = options.maxSlopeDeg ?? 42;
+      const color = options.color ?? 0x4f6b4a;
+
+      const totalAreaKm2 = (width * res) * (height * res) / 1000000;
+      const count = Math.ceil(totalAreaKm2 * countPerKm);
+
+      // Simple grass blades (flat planes)
+      const geo = new THREE.PlaneGeometry(0.8, 1.2);
+      geo.translate(0, 0.6, 0); // Pivot at the bottom
+
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        side: THREE.DoubleSide,
+        transparent: true,
+        alphaTest: 0.5 // simple transparency hack for grass
+      });
+
+      const grassInstanced = new THREE.InstancedMesh(geo, mat, count);
+      
+      let placed = 0;
+      let attempts = 0;
+      const maxAttempts = count * 20;
+
+      while (placed < count && attempts < maxAttempts) {
+        attempts++;
+
+        const i = Math.floor(Math.random() * width);
+        const j = Math.floor(Math.random() * height);
+
+        const x = minX + i * res;
+        const y = minY + j * res;
+
+        const dTrack = distanceToTrack(track, x, y);
+        if (dTrack < minDistToTrack) continue;
+
+        const slope = localSlope(grid, i, j);
+        if (slope > maxSlopeDeg) continue;
+
+        // Jitter and sample height more accurately
+        const jitterX = (Math.random() - 0.5) * res * 1.1;
+        const jitterY = (Math.random() - 0.5) * res * 1.1;
+
+        const xJ = x + jitterX;
+        const yJ = y + jitterY;
+        const zJ = sampleHeightLocal(grid, xJ, yJ) * elevationScale;
+
+        P.set(xJ, zJ + 0.02, yJ);
+
+        const yaw = Math.random() * Math.PI * 2;
+        Q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+
+        const scale = 0.7 + Math.random() * 0.6;
+        DUMMY.position.copy(P);
+        DUMMY.quaternion.copy(Q);
+        DUMMY.scale.set(scale, scale, scale);
+        DUMMY.updateMatrix();
+        
+        grassInstanced.setMatrixAt(placed, DUMMY.matrix);
+        placed++;
+      }
+      
+      grassInstanced.count = placed;
+      return grassInstanced;
+    }
+
+    // =================================================================
+    // Inlined js/theme.js (Scene Theming)
+    // =================================================================
+
+    // Small helper: ensure fog exists and apply parameters
+    function setFog(scene, colorHex, near, far) {
+      if (!scene.fog) {
+        scene.fog = new THREE.Fog(colorHex, near, far);
+      } else {
+        scene.fog.color.set(colorHex);
+        scene.fog.near = near;
+        scene.fog.far = far;
+      }
+    }
+
+    // English Countryside – default
+    function applyThemeEnglish(scene, grid, track, opts = {}) {
+      const group = new THREE.Group();
+      const elevationScale = opts.elevationScale ?? 1;
+
+      const skyColor = 0xaad0ff;
+      scene.background = new THREE.Color(skyColor);
+      setFog(scene, skyColor, 120, 2000);
+
+      // Lakes
+      const lakes = buildLakes(grid, {
+        color: 0x70c1ff,
+        opacity: 0.92,
+        elevationScale
+      });
+      group.add(lakes);
+
+      // Trees
+      const trees = buildTreeInstances(grid, track, {
+        elevationScale,
+        countPerKm: 250,
+        minDistToTrack: 15,
+        maxSlopeDeg: 35,
+        colors: {
+          trunk: 0x7a4a21,
+          foliage: 0x4f6b4a
+        }
+      });
+      group.add(trees);
+
+      // Grass
+      const grass = buildGrassInstances(grid, track, {
+        elevationScale,
+        countPerKm: 900,
+        minDistToTrack: 7,
+        maxSlopeDeg: 42,
+        color: 0x4f6b4a
+      });
+      group.add(grass);
+
+      return group;
+    }
+
+    // Fairytale Dusk
+    function applyThemeFairytale(scene, grid, track, opts = {}) {
+      const group = new THREE.Group();
+      const elevationScale = opts.elevationScale ?? 1;
+
+      const skyColor = 0x33405c; // Deep blue/purple dusk
+      scene.background = new THREE.Color(skyColor);
+      setFog(scene, skyColor, 100, 1500);
+
+      // Lakes (darker, more reflective)
+      const lakes = buildLakes(grid, {
+        color: 0x1a2333,
+        opacity: 0.95,
+        elevationScale
+      });
+      group.add(lakes);
+
+      // Trees (denser, darker)
+      const trees = buildTreeInstances(grid, track, {
+        elevationScale,
+        countPerKm: 400,
+        minDistToTrack: 10,
+        maxSlopeDeg: 30,
+        colors: {
+          trunk: 0x5a351a,
+          foliage: 0x1f2e21 // Dark foliage
+        }
+      });
+      group.add(trees);
+
+      // Grass (sparse, mossy)
+      const grass = buildGrassInstances(grid, track, {
+        elevationScale,
+        countPerKm: 500,
+        minDistToTrack: 5,
+        maxSlopeDeg: 40,
+        color: 0x2e4f21
+      });
+      group.add(grass);
+
+      return group;
+    }
+
+    // Adventure Land
+    function applyThemeAdventure(scene, grid, track, opts = {}) {
+      const group = new THREE.Group();
+      const elevationScale = opts.elevationScale ?? 1;
+
+      const skyColor = 0xd4c7a5; // Desaturated warm sky
+      scene.background = new THREE.Color(skyColor);
+      setFog(scene, skyColor, 150, 2500);
+
+      // Lakes (shallow, brownish)
+      const lakes = buildLakes(grid, {
+        color: 0x8a7e6b,
+        opacity: 0.8,
+        elevationScale
+      });
+      group.add(lakes);
+
+      // Trees (sparse, rugged)
+      const trees = buildTreeInstances(grid, track, {
+        elevationScale,
+        countPerKm: 150,
+        minDistToTrack: 25,
+        maxSlopeDeg: 45,
+        colors: {
+          trunk: 0x613f1e,
+          foliage: 0x8b6a4d // Tan/brown foliage
+        }
+      });
+      group.add(trees);
+
+      // Grass (very sparse, dry)
+      const grass = buildGrassInstances(grid, track, {
+        elevationScale,
+        countPerKm: 200,
+        minDistToTrack: 10,
+        maxSlopeDeg: 50,
+        color: 0x9e886a
+      });
+      group.add(grass);
+
+      return group;
+    }
+
+    // Clear Scenery
+    function applyThemeClear(scene, grid, track, opts = {}) {
+      const group = new THREE.Group();
+      const elevationScale = opts.elevationScale ?? 1;
+
+      const skyColor = 0xbfefff;
+      scene.background = new THREE.Color(skyColor);
+      setFog(scene, skyColor, 140, 4000);
+
+      // Optional: a few lakes, very sparse trees/grass for scale.
+      const lakes = buildLakes(grid, {
+        color: 0x70c1ff,
+        opacity: 0.9,
+        elevationScale
+      });
+      group.add(lakes);
+
+      // Very sparse trees just to prevent total emptiness
+      const trees = buildTreeInstances(grid, track, {
+        elevationScale,
+        countPerKm: 40,
+        minDistToTrack: 20,
+        maxSlopeDeg: 28,
+        colors: {
+          trunk: 0x7a4a21,
+          foliage: 0x4f6b4a
+        }
+      });
+      group.add(trees);
+
+      return group;
+    }
+
+    // Theme map for easy switching
+    const THEMES = {
+      english: { apply: applyThemeEnglish, roadColor: 0x444444, shoulderColor: 0x888888 },
+      fairytale: { apply: applyThemeFairytale, roadColor: 0x222222, shoulderColor: 0x555555 },
+      adventure: { apply: applyThemeAdventure, roadColor: 0x5e5e5e, shoulderColor: 0x9a9a9a },
+      clear: { apply: applyThemeClear, roadColor: 0x444444, shoulderColor: 0x888888 },
+    };
+
+    // =================================================================
+    // Inlined js/scene.js (Scene Initialization)
+    // =================================================================
+
+    function initScene(canvas) {
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xaad0ff); // Default sky
+
+      camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        20000
+      );
+      camera.position.set(0, 300, 0); // Start position at (X, Y-up, Z-depth)
+
+      controls = new OrbitControls(camera, canvas);
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      // Lights
+      const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+      sun.position.set(200, 200, 300);
+      sun.castShadow = true;
+      scene.add(sun);
+
+      const amb = new THREE.AmbientLight(0xffffff, 0.35);
+      scene.add(amb);
+
+      // Resize handling
+      window.addEventListener("resize", () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+      });
+
+      return { scene, camera, renderer, controls };
+    }
+
+    function startRenderLoop() {
+      if (renderer) animate(0);
+    }
+
+    // =================================================================
+    // Inlined js/main.js (Main Application Logic)
+    // =================================================================
+
+    // --- Loading and Setup ---
+
+    async function loadRouteAndBuildScene(track) {
+      gpxStatus.textContent = `Route loaded: ${(track.length / 1000).toFixed(2)} km`;
+      demStatus.textContent = `Loading DEM data...`;
+
+      // 1. Build DEM Grid
+      const rawDEM = await loadDEM(track);
+      let demGrid = buildLocalDEM(track, rawDEM);
+      sculptDEMGrid(demGrid, track);
+      demStatus.textContent = `DEM Grid ready: ${demGrid.width}x${demGrid.height} @ ${demGrid.res.toFixed(1)}m/px`;
+
+      // 2. Clear old geometry
+      if (terrainMesh) disposeHierarchy(terrainMesh.mesh);
+      if (currentBiomeGroup) disposeHierarchy(currentBiomeGroup);
+      if (currentRoad) disposeHierarchy(currentRoad.group);
+      scene.remove(terrainMesh?.mesh, currentBiomeGroup, currentRoad?.group);
+      
+      // 3. Build new Terrain
+      // Pass the track data along with the grid in the object
+      terrainMesh = buildTerrainMesh(demGrid, { elevationScale, color: 0xc8d2b5, smooth: 1 });
+      scene.add(terrainMesh.mesh);
+      
+      // Store the full track object for theme changing later (FIXED)
+      terrainMesh.trackData = track; 
+
+      // 4. Build Road & Shoulders
+      const roadOptions = THEMES.english; // Default to English colors
+      currentRoad = buildRoadMeshes(track, demGrid, { elevationScale, roadWidth: 6, shoulderWidth: 4, ...roadOptions });
+      scene.add(currentRoad.group);
+
+      // 5. Build Track3D (points for camera movement)
+      // The track data also needs the cumulative distance property (cumDist) which is on the original track.points.
+      track3D = track.points.map(p => ({
+          x: p.x, 
+          y: p.y, // Y (depth) in world space
+          z: p.z * elevationScale, // Z (up) in world space (This is World Y-up)
+          cumDist: p.cumDist
+      }));
+
+      // 6. Apply current theme (English default)
+      applyTheme('english', demGrid, track);
+
+      // Reset ride
+      distanceAlong = 0;
+    }
+
+    function applyTheme(themeName, grid, track) {
+      if (!THEMES[themeName]) return;
+
+      if (currentBiomeGroup) {
+        disposeHierarchy(currentBiomeGroup);
+        scene.remove(currentBiomeGroup);
+      }
+      
+      // Ensure the grid passed to theme functions has the elevation scale set 
+      const gridWithScale = { ...grid, elevationScale };
+
+      currentBiomeGroup = THEMES[themeName].apply(scene, gridWithScale, track, { elevationScale });
+      scene.add(currentBiomeGroup);
+
+      // Update terrain/road colors based on theme
+      const { roadColor, shoulderColor } = THEMES[themeName];
+      if (currentRoad) {
+        currentRoad.road.material.color.set(roadColor);
+        currentRoad.leftShoulder.material.color.set(shoulderColor);
+        currentRoad.rightShoulder.material.color.set(shoulderColor);
+      }
+    }
+
+    // --- Demo Route Data ---
+    const DEMO_GPX = `
+<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="Demo">
+  <trk>
+    <trkseg>
+      <trkpt lat="47.640941" lon="-122.316885"><ele>20</ele></trkpt>
+      <trkpt lat="47.642050" lon="-122.315000"><ele>25</ele></trkpt>
+      <trkpt lat="47.643159" lon="-122.313115"><ele>30</ele></trkpt>
+      <trkpt lat="47.644268" lon="-122.311230"><ele>35</ele></trkpt>
+      <trkpt lat="47.645377" lon="-122.309345"><ele>40</ele></trkpt>
+      <trkpt lat="47.646486" lon="-122.307460"><ele>45</ele></trkpt>
+      <trkpt lat="47.647595" lon="-122.305575"><ele>50</ele></trkpt>
+      <trkpt lat="47.648704" lon="-122.303690"><ele>55</ele></trkpt>
+      <trkpt lat="47.649813" lon="-122.301805"><ele>60</ele></trkpt>
+    </trkseg>
+  </trk>
+</gpx>`;
+
+    async function loadDemoRoute() {
+      gpxStatus.textContent = "Loading demo route...";
+      try {
+        const rawTrack = await loadGPX(DEMO_GPX);
+        const track = resampleTrack(rawTrack, 5);
+        await loadRouteAndBuildScene(track);
+      } catch (e) {
+        console.error("Demo route failed:", e);
+        gpxStatus.textContent = `Error loading demo route: ${e.message}`;
+      }
+    }
+
+    async function loadRouteFromGPX(file) {
+      gpxStatus.textContent = `Loading ${file.name}...`;
+      try {
+        const rawTrack = await loadGPX(file);
+        const track = resampleTrack(rawTrack, 5);
+        await loadRouteAndBuildScene(track);
+      } catch (e) {
+        console.error("GPX load failed:", e);
+        gpxStatus.textContent = `Error loading GPX: ${e.message}`;
+      }
+    }
+
+
+    // --- Ride Simulation Loop ---
+
+    // Custom class to hold interpolated position, allowing us to find position
+    // by interpolating between two track3D points.
+    class InterpolatedPoint {
+        constructor(x, y, z, cumDist) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.cumDist = cumDist;
+        }
+        lerp(other, t) {
+            this.x = lerp(this.x, other.x, t);
+            this.y = lerp(this.y, other.y, t);
+            this.z = lerp(this.z, other.z, t);
+            return this;
+        }
+    }
+
+    function updateRide(dt) {
+      if (track3D.length < 2) return;
+
+      // Update distance
+      distanceAlong += speed * dt;
+
+      // Wrap-around distance for continuous loop
+      const totalLength = track3D[track3D.length - 1].cumDist;
+      while (distanceAlong > totalLength) {
+        distanceAlong -= totalLength;
+      }
+
+      // Find segment for current position
+      let i = 0;
+      while (i < track3D.length - 2 && track3D[i + 1].cumDist < distanceAlong) {
+        i++;
+      }
+
+      const a = track3D[i];
+      const b = track3D[i + 1];
+      const dist0 = a.cumDist;
+      const dist1 = b.cumDist;
+      
+      const t = (dist1 - dist0) > 0 ? clamp((distanceAlong - dist0) / (dist1 - dist0), 0, 1) : 0;
+
+      // Interpolate position
+      const currentPos = new InterpolatedPoint(a.x, a.y, a.z, a.cumDist).lerp(b, t);
+      
+      // Calculate direction vector (Tangent) in X-Y plane
+      const dx = b.x - a.x; // track direction vector X
+      const dy = b.y - a.y; // track direction vector Y
+      const length = Math.sqrt(dx * dx + dy * dy);
+
+      const dirNormX = dx / length;
+      const dirNormY = dy / length; // This is the World Z (Depth) direction
+
+      // Camera settings
+      const offset = 4.0; // 4 meters behind
+      const height = 2.0; // 2 meters up
+      const lookAhead = 2.0; // 2 meters ahead
+
+      // Camera Position: World coordinates (X, Y-up, Z-depth)
+      // currentPos.z is the Y-up coordinate
+      // currentPos.y is the Z-depth coordinate
+      const camX = currentPos.x - dirNormX * offset;
+      const camY = currentPos.y - dirNormY * offset;
+      const camZ_up = currentPos.z + height; 
+      camera.position.set(camX, camZ_up, camY); // Sets (World X, World Y-up, World Z-depth)
+
+      // LookAt Target: World coordinates (X, Y-up, Z-depth)
+      const lookX = currentPos.x + dirNormX * lookAhead;
+      const lookY = currentPos.y + dirNormY * lookAhead; 
+      const lookZ_up = currentPos.z + 1.5; // eye height
+      camera.lookAt(lookX, lookZ_up, lookY); // Sets (World X, World Y-up, World Z-depth)
+
+      hudDist.textContent = (distanceAlong / 1000).toFixed(2) + " km";
+      hudSpeed.textContent = ((speed * 3.6)).toFixed(1) + " km/h";
+      hudElev.textContent = currentPos.z.toFixed(0) + " m";
+    }
+
+    // MAIN LOOP
+    function animate(time) {
+      requestAnimationFrame(animate);
+      const t = time * 0.001;
+      const dt = t - lastTime;
+      lastTime = t;
+
+      // CRITICAL FIX: Only run ride logic and disable controls if a track is loaded.
+      if (track3D.length > 1) {
+        updateRide(dt);
+        controls.enabled = false;
+      } else {
+        controls.enabled = true;
+        controls.update(); // Allow manual exploration before ride starts
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    // --- UI Hooks and Initialization ---
+
+    function init() {
+      const canvas = document.getElementById("scene");
+      initScene(canvas);
+
+      // Event listeners
+      document.getElementById("gpx-file")
+        .addEventListener("change", e => {
+          const file = e.target.files[0];
+          if (file) loadRouteFromGPX(file);
+        });
+
+      document.getElementById("demo-btn")
+        .addEventListener("click", loadDemoRoute);
+        
+      // Speed control listener
+      speedSlider.addEventListener("input", (e) => {
+        speed = parseFloat(e.target.value);
+        hudCurrentSpeed.textContent = speed.toFixed(1);
+        hudKMH.textContent = (speed * 3.6).toFixed(1);
+      });
+
+      themeButtons.querySelectorAll("button")
+        .forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            if (terrainMesh && terrainMesh.trackData) {
+              const themeName = e.target.dataset.theme;
+              applyTheme(themeName, terrainMesh.grid, terrainMesh.trackData);
+            }
+          });
+        });
+
+      // Start the render loop immediately for setup
+      startRenderLoop();
+    }
+
+    // Initialize the application
+    init();
+
+  </script>
+</body>
+</html>
